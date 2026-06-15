@@ -1,10 +1,10 @@
 {
     "id": "minimap",
     "name": "Note Minimap",
-    "author": "Yair Segel",
+    "author": "GLOGLO",
     "description": "Add a minimap to your Markdown notes.",
 
     "minAppVersion": "1.8.10",
-    "version": "1.2.0",
+    "version": "2.0.0",
     "isDesktopOnly": false
 }

@@ -1,1 +1,16 @@
 data.json
+
+# Local/editor files
+.obsidian/
+.vscode/
+.idea/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Dependency/build output, if this fork gains a build step later
+node_modules/
+dist/
+build/

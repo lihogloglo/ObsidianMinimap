@@ -1,814 +1,909 @@
 const {
-    Plugin,
     MarkdownView,
-    setIcon,
-    debounce,
-    Setting,
-    PluginSettingTab,
-    MarkdownRenderer,
     Notice,
+    Plugin,
+    PluginSettingTab,
+    Setting,
+    debounce,
+    setIcon,
 } = require("obsidian");
+
+const DEFAULT_SETTINGS = {
+    enabledByDefault: true,
+    scale: 0.1,
+    minimapOpacity: 0.22,
+    sliderOpacity: 0.32,
+    topOffset: 0,
+    width: 120,
+    maxColumn: 120,
+    renderCharacters: true,
+};
 
 class MinimapSettingTab extends PluginSettingTab {
     constructor(plugin) {
         super(plugin.app, plugin);
         this.plugin = plugin;
     }
+
     display() {
         const { containerEl } = this;
         containerEl.empty();
 
         new Setting(containerEl)
             .setName("Enable by default")
-            .setDesc(
-                "Already opened notes will not be affected by changing this"
-            )
+            .setDesc("Controls whether newly opened notes show the minimap.")
             .addToggle((toggle) => {
                 toggle
                     .setValue(this.plugin.settings.enabledByDefault)
-                    .onChange((value) => {
-                        this.plugin.settings.enabledByDefault = value;
-                        this.plugin.saveSettings();
-                    });
-            });
-
-        new Setting(containerEl)
-            .setName("Better Rendering (in development)")
-            .setDesc(
-                "Use a hidden helper note to render the minimap, improving flickering and consistent loading. Changing this will trigger a plugin restart"
-            )
-            .addToggle((toggle) => {
-                toggle
-                    .setValue(this.plugin.settings.betterRendering)
                     .onChange(async (value) => {
-                        this.plugin.settings.betterRendering = value;
+                        this.plugin.settings.enabledByDefault = value;
                         await this.plugin.saveSettings();
-
-                        // Restart plugin to apply changes
-                        await this.app.plugins.disablePlugin("minimap");
-                        await this.app.plugins.enablePlugin("minimap");
-                        this.app.setting.openTabById("minimap");
-                        new Notice(
-                            "Note Minimap: Restarted plugin for Better Rendering change.",
-                            3000
-                        );
                     });
             });
 
         new Setting(containerEl)
-            .setName("Scale")
-            .setDesc("Change the minimap scale (0.05 - 0.3)")
+            .setName("Line scale")
+            .setDesc("Height of each document line in the minimap.")
             .addSlider((slider) => {
                 slider
                     .setLimits(0.05, 0.3, 0.01)
                     .setValue(this.plugin.settings.scale)
                     .setDynamicTooltip()
-                    .onChange((value) => {
+                    .onChange(async (value) => {
                         this.plugin.settings.scale = value;
-                        this.plugin.saveSettings();
+                        await this.plugin.saveSettings();
+                    });
+            });
+
+        new Setting(containerEl)
+            .setName("Width")
+            .setDesc("Minimap width in pixels.")
+            .addSlider((slider) => {
+                slider
+                    .setLimits(72, 220, 1)
+                    .setValue(this.plugin.settings.width)
+                    .setDynamicTooltip()
+                    .onChange(async (value) => {
+                        this.plugin.settings.width = value;
+                        await this.plugin.saveSettings();
+                    });
+            });
+
+        new Setting(containerEl)
+            .setName("Max column")
+            .setDesc("Maximum characters rendered from each line.")
+            .addSlider((slider) => {
+                slider
+                    .setLimits(40, 220, 1)
+                    .setValue(this.plugin.settings.maxColumn)
+                    .setDynamicTooltip()
+                    .onChange(async (value) => {
+                        this.plugin.settings.maxColumn = value;
+                        await this.plugin.saveSettings();
+                    });
+            });
+
+        new Setting(containerEl)
+            .setName("Render characters")
+            .setDesc("Disable this to render compact line blocks.")
+            .addToggle((toggle) => {
+                toggle
+                    .setValue(this.plugin.settings.renderCharacters)
+                    .onChange(async (value) => {
+                        this.plugin.settings.renderCharacters = value;
+                        await this.plugin.saveSettings();
                     });
             });
 
         new Setting(containerEl)
             .setName("Opacity")
-            .setDesc("Change the minimap's background opacity (0.05 - 1)")
+            .setDesc("Minimap background opacity.")
             .addSlider((slider) => {
                 slider
                     .setLimits(0.05, 1, 0.01)
                     .setValue(this.plugin.settings.minimapOpacity)
                     .setDynamicTooltip()
-                    .onChange((value) => {
+                    .onChange(async (value) => {
                         this.plugin.settings.minimapOpacity = value;
-                        this.plugin.saveSettings();
+                        await this.plugin.saveSettings();
                     });
             });
 
         new Setting(containerEl)
-            .setName("Slider Opacity")
-            .setDesc("Change the slider opacity (0.05 - 1)")
+            .setName("Slider opacity")
+            .setDesc("Viewport slider opacity.")
             .addSlider((slider) => {
                 slider
                     .setLimits(0.05, 1, 0.01)
                     .setValue(this.plugin.settings.sliderOpacity)
                     .setDynamicTooltip()
-                    .onChange((value) => {
+                    .onChange(async (value) => {
                         this.plugin.settings.sliderOpacity = value;
-                        this.plugin.saveSettings();
+                        await this.plugin.saveSettings();
                     });
             });
 
         new Setting(containerEl)
-            .setName("Top Offset")
-            .setDesc(
-                "Offset the minimap from the top (pixels) - for special plugin toolbars"
-            )
+            .setName("Top offset")
+            .setDesc("Offset from the top in pixels for custom toolbars.")
             .addSlider((slider) => {
                 slider
-                    .setLimits(0, 100, 1)
+                    .setLimits(0, 120, 1)
                     .setValue(this.plugin.settings.topOffset)
                     .setDynamicTooltip()
-                    .onChange((value) => {
+                    .onChange(async (value) => {
                         this.plugin.settings.topOffset = value;
-                        this.plugin.saveSettings();
+                        await this.plugin.saveSettings();
                     });
             });
     }
 }
 
 class NoteMinimap extends Plugin {
-    activeNoteView = null;
-    updateNeeded = false;
-    minimapInstances = new Map(); // element: noteInstance
+    constructor(...args) {
+        super(...args);
+        this.instances = new Map();
+        this.statusBarItemEl = null;
+        this.statusBarToggleButton = null;
+        this.refreshAll = debounce(() => this.syncLeaves(), 80, true);
+        this.redrawAll = debounce(() => {
+            for (const instance of this.instances.values()) {
+                instance.requestRender();
+            }
+        }, 120, true);
+    }
 
     async onload() {
-        console.log("NoteMinimap Loaded");
-
-        // Handle resize
-        const resized = new Set(); // entry.target = element
-        const resize = throttle(() => {
-            for (const el of resized) {
-                for (const [element, note] of this.minimapInstances.entries()) {
-                    if (element === el) {
-                        note.onResize();
-                        break; // Exit inner loop once a match is found
-                    }
-                }
-            }
-            resized.clear();
-        }, 1000);
-        this.resizeObserver = new ResizeObserver((entries) => {
-            for (const entry of entries) {
-                resized.add(entry.target);
-            }
-            resize();
-        });
-
-        // Handle mode change, notice that there is no way to unobserve only one element
-        this.modeObserver = new MutationObserver((entries) => {
-            const entry = entries[0]; // all entries will be about the same topic anyways
-            const noteInstance = this.minimapInstances.get(
-                entry.target.parentElement
-            );
-            if (entry.attributeName === "style") noteInstance?.modeChange();
-            this.updateElementMinimap();
-        });
-
-        // Manage active leaf
-        this.registerEvent(
-            this.app.workspace.on("active-leaf-change", (newActiveLeaf) => {
-                this.checkAndDealWithUserOpeningHelperLeaves(newActiveLeaf);
-                this.updateElementMinimap(); // old leaf
-                this.activeNoteView = newActiveLeaf.view;
-                // console.log(
-                //     "Active leaf changed, current active view:",
-                //     this.activeNoteView
-                // );
-                this.updateElementMinimap(); // new leaf
-
-                // Toggle button
-                if (newActiveLeaf?.view?.getViewType() === "markdown") {
-                    if (this.settings.betterRendering)
-                        this.openHelperForLeaf(newActiveLeaf);
-                    this.addToggleButtonToLeaf(newActiveLeaf);
-                }
-            })
-        );
-
-        // Update previews as needed
-        this.debouncedUpdateMinimap = debounce(
-            () => {
-                this.updateElementMinimap();
-            },
-            700,
-            true
-        );
-        this.registerEvent(
-            this.app.workspace.on("editor-change", this.debouncedUpdateMinimap)
-        );
-
-        // mode changes for better rendering
-        const updateHelpers = throttle(() => {
-            this.app.workspace.getLeavesOfType("markdown").forEach((leaf) => {
-                this.updateHelperForLeaf(leaf);
-            });
-            this.updateElementMinimap();
-        }, 500);
-        // This event does not provide arguments
-        this.registerEvent(
-            this.app.workspace.on("layout-change", () => {
-                if (this.settings.betterRendering) {
-                    this.detachRedundantHelperLeavesAndRestoreMissing();
-                    updateHelpers();
-                }
-
-                // mode changes cause resizing since the height of the note contents changes
-                this.minimapInstances
-                    .get(this.activeNoteView?.contentEl)
-                    ?.onResize();
-
-                // closed notes
-                const openEls = new Set(
-                    this.app.workspace
-                        .getLeavesOfType("markdown")
-                        .map((l) => l.view.contentEl)
-                );
-                for (const [el, note] of this.minimapInstances.entries()) {
-                    if (!openEls.has(el)) {
-                        // console.log("note closed", el);
-                        note.destroy();
-                        this.minimapInstances.delete(el);
-                        this.resizeObserver.unobserve(el);
-                    }
-                }
-            })
-        );
-
         await this.loadSettings();
         this.addSettingTab(new MinimapSettingTab(this));
-        this.app.workspace.onLayoutReady(() => {
-            this.activeNoteView =
-                this.app.workspace.getActiveViewOfType(MarkdownView);
-            this.injectMinimapIntoAllNotes();
+        this.setupStatusBarToggle();
+
+        this.registerEvent(
+            this.app.workspace.on("layout-change", () => this.refreshAll())
+        );
+        this.registerEvent(
+            this.app.workspace.on("active-leaf-change", () => this.refreshAll())
+        );
+        this.registerEvent(
+            this.app.workspace.on("file-open", () => this.refreshAll())
+        );
+        this.registerEvent(
+            this.app.workspace.on("editor-change", (_editor, info) => {
+                if (info instanceof MarkdownView) {
+                    this.updateView(info);
+                    return;
+                }
+                this.redrawAll();
+            })
+        );
+        this.registerEvent(
+            this.app.vault.on("modify", (file) => this.updateFile(file))
+        );
+        this.registerDomEvent(window, "focus", () => this.refreshAll());
+        this.registerDomEvent(window, "blur", () => {
+            for (const instance of this.instances.values()) {
+                instance.cancelDrag();
+            }
         });
+
+        this.app.workspace.onLayoutReady(() => this.syncLeaves());
+        console.log("NoteMinimap loaded");
     }
 
     onunload() {
-        // IMPORTANT: Obsidian automatically unregisters hooks made only by using this.registerEvent or this.registerDomEvent.
+        if (this.refreshAll?.cancel) this.refreshAll.cancel();
+        if (this.redrawAll?.cancel) this.redrawAll.cancel();
 
-        // Free timeout
-        if (this.debouncedUpdateMinimap?.cancel) {
-            this.debouncedUpdateMinimap.cancel();
+        for (const instance of this.instances.values()) {
+            instance.destroy();
         }
-
-        // Destroy all Note instances and disconnect Observers
-        this.minimapInstances.forEach((noteInstance) => noteInstance.destroy());
-        this.resizeObserver.disconnect();
-        this.modeObserver.disconnect();
+        this.instances.clear();
 
         document
             .querySelectorAll(".minimap-toggle-button")
             .forEach((button) => button.remove());
-        this.detachAllHelperLeaves();
+        this.statusBarItemEl?.remove();
+        this.statusBarItemEl = null;
+        this.statusBarToggleButton = null;
+        document
+            .querySelectorAll(".minimap-disabled")
+            .forEach((el) => el.classList.remove("minimap-disabled"));
 
-        console.log("NoteMinimap Unloaded");
+        console.log("NoteMinimap unloaded");
     }
 
     async loadSettings() {
-        this.settings = Object.assign(
-            {
-                enabledByDefault: true,
-                betterRendering: true,
-                scale: 0.1,
-                minimapOpacity: 0.3,
-                sliderOpacity: 0.3,
-                topOffset: 0,
-            },
-            await this.loadData()
-        );
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+
+        if ("betterRendering" in this.settings) {
+            delete this.settings.betterRendering;
+        }
     }
 
     async saveSettings() {
         await this.saveData(this.settings);
-
-        // Update all existing notes
-        for (const note of this.minimapInstances.values()) {
-            note.updateSettings(this.settings);
+        for (const instance of this.instances.values()) {
+            instance.updateSettings(this.settings);
         }
     }
 
-    injectMinimapIntoAllNotes() {
+    syncLeaves() {
         const leaves = this.app.workspace.getLeavesOfType("markdown");
+        const openLeafIds = new Set();
+
         for (const leaf of leaves) {
-            if (this.settings.betterRendering) this.openHelperForLeaf(leaf);
+            if (!(leaf.view instanceof MarkdownView)) continue;
+            openLeafIds.add(leaf.id);
             this.addToggleButtonToLeaf(leaf);
-            this.updateElementMinimap(
-                leaf.view.contentEl,
-                this.helperLeafIds.get(leaf.id)
-            );
+            this.ensureLeaf(leaf);
+            this.updateLeafToggleButton(leaf);
         }
+
+        for (const [leafId, instance] of Array.from(this.instances.entries())) {
+            if (!openLeafIds.has(leafId)) {
+                instance.destroy();
+                this.instances.delete(leafId);
+            }
+        }
+
+        this.updateStatusBarToggle();
     }
 
-    async updateElementMinimap(element, helperLeafId) {
-        await sleep(100); // wait for helper to open
-        const activeLeaf = this.app.workspace.activeLeaf;
-        helperLeafId = this.helperLeafIds.get(activeLeaf.id);
-        // If no element is provided, use the active leaf
-        if (!element) {
-            if (!this.activeNoteView) return;
-            element = this.activeNoteView.contentEl;
+    ensureLeaf(leaf) {
+        const view = leaf.view;
+        const contentEl = view?.contentEl;
+        if (!contentEl || !(view instanceof MarkdownView)) return;
+
+        if (!this.settings.enabledByDefault && !contentEl.dataset.minimapTouched) {
+            contentEl.classList.add("minimap-disabled");
         }
 
-        // Assert it's a markdown note by checking for the two needed children
-        if (
-            !element.querySelector(".markdown-source-view") ||
-            !element.querySelector(".markdown-preview-view")
-        )
-            return;
-
-        // If disabled, remove the minimap if it exists
-        if (element.classList.contains("minimap-disabled")) {
-            const existing = this.minimapInstances.get(element);
+        if (contentEl.classList.contains("minimap-disabled")) {
+            const existing = this.instances.get(leaf.id);
             if (existing) {
                 existing.destroy();
-                this.minimapInstances.delete(element);
-                this.resizeObserver.unobserve(element);
-                // MutationObserver.unobserve() does not exist...
+                this.instances.delete(leaf.id);
             }
             return;
         }
 
-        // Update or create the Note instance for this element
-        if (this.minimapInstances.has(element)) {
-            const noteInstance = this.minimapInstances.get(element);
-            noteInstance.updateIframe();
-        } else {
-            const minimapInstance = new Minimap(
-                this,
-                element,
-                this.settings,
-                helperLeafId
-            );
-            this.minimapInstances.set(element, minimapInstance);
-            this.resizeObserver.observe(element);
-            this.modeObserver.observe(minimapInstance.sourceView, {
-                attributes: true,
-            });
-            // console.log("Created new Note instance for leaf:", element);
+        const existing = this.instances.get(leaf.id);
+        if (existing) {
+            existing.updateLeaf(leaf);
+            existing.requestRender();
+            return;
+        }
+
+        this.instances.set(leaf.id, new MinimapInstance(this, leaf, this.settings));
+    }
+
+    updateView(view) {
+        const leaf = this.app.workspace.getLeavesOfType("markdown").find((item) => {
+            return item.view === view;
+        });
+
+        if (!leaf) {
+            this.redrawAll();
+            return;
+        }
+
+        this.addToggleButtonToLeaf(leaf);
+        this.ensureLeaf(leaf);
+        this.updateLeafToggleButton(leaf);
+        this.updateStatusBarToggle();
+        this.instances.get(leaf.id)?.requestRender();
+    }
+
+    updateFile(file) {
+        for (const instance of this.instances.values()) {
+            if (instance.view?.file?.path === file.path) {
+                instance.requestRender();
+            }
         }
     }
 
     addToggleButtonToLeaf(leaf) {
-        const viewActions =
-            leaf.view.containerEl.querySelector(".view-actions");
-
-        if (!viewActions) return;
-
-        // Avoid adding twice
+        const viewActions = leaf.view?.containerEl?.querySelector(".view-actions");
+        const contentEl = leaf.view?.contentEl;
+        if (!viewActions || !contentEl) return;
         if (viewActions.querySelector(".minimap-toggle-button")) return;
 
         const button = document.createElement("button");
-        button.className = "clickable-icon view-actions minimap-toggle-button";
-        button.setAttribute("aria-label", "Toggle Minimap");
+        button.className = "clickable-icon minimap-toggle-button";
+        button.setAttribute("aria-label", "Toggle minimap");
+        button.setAttribute("aria-pressed", "false");
+        setIcon(button, "panel-right");
 
-        // Use Obsidian's built-in icon
-        setIcon(button, "star-list");
-
-        const contentEl = leaf.view.contentEl;
-        button.onclick = () => {
-            contentEl.classList.toggle("minimap-disabled");
-            this.updateElementMinimap(contentEl);
-        };
-
-        // Handle disable-by-default
-        if (!this.settings.enabledByDefault)
-            contentEl.classList.add("minimap-disabled");
+        button.addEventListener("click", () => {
+            this.toggleLeafMinimap(leaf, true);
+        });
 
         viewActions.prepend(button);
+        this.updateLeafToggleButton(leaf);
     }
 
-    // Functions towards switching to rendering minimap with a helper leaf instead of the actual - to improve use experience
-    helperLeafIds = new Map(); // originalLeafId: helperLeafId
-    async openHelperForLeaf(leaf) {
-        if (!leaf) return;
-        if (this.helperLeafIds.has(leaf.id)) return; // already has a helper
-        if ([...this.helperLeafIds.values()].includes(leaf.id)) return; // is a helper itself
-        // if (leaf.view?.getViewType() !== "markdown") return;
-        const file = leaf.view.file;
-        if (!file) return;
+    setupStatusBarToggle() {
+        this.statusBarItemEl = this.addStatusBarItem();
+        this.statusBarItemEl.classList.add("minimap-status-bar-item");
 
-        // Create the helper leaf in the right sidebar, save its id and open the same content in it
-        const rightLeaf = this.app.workspace.getRightLeaf(false);
-        this.helperLeafIds.set(leaf.id, rightLeaf.id);
-        this.updateHelperForLeaf(leaf);
-        // console.log(`Opened helper leaf ${rightLeaf.id} for original leaf ${leaf.id}`);
+        const button = document.createElement("button");
+        button.className = "clickable-icon minimap-status-toggle";
+        button.type = "button";
+        setIcon(button, "panel-right");
+        this.statusBarItemEl.appendChild(button);
+        this.statusBarToggleButton = button;
+
+        this.registerDomEvent(button, "click", () => this.toggleActiveMinimap());
+        this.updateStatusBarToggle();
     }
-    detachRedundantHelperLeavesAndRestoreMissing() {
-        this.helperLeafIds.forEach((helperLeafId, originalLeafId) => {
-            if (this.app.workspace.getLeafById(originalLeafId)) {
-                // original leaf exists - assert helper leaf exists
-                if (!this.app.workspace.getLeafById(helperLeafId)) {
-                    this.helperLeafIds.delete(originalLeafId);
-                    // console.log(`Restoring missing helper leaf ${helperLeafId} for original leaf ${originalLeafId}`);
-                    const originalLeaf =
-                        this.app.workspace.getLeafById(originalLeafId);
-                    this.openHelperForLeaf(originalLeaf);
-                    new Notice(
-                        "Note Minimap: This is a helper note used for Better Rendering - avoid touching it!",
-                        4000
-                    );
-                }
-            } else {
-                const helperLeaf = this.app.workspace.getLeafById(helperLeafId);
-                if (helperLeaf) {
-                    // console.log(`Closing helper leaf ${helperLeafId} as original leaf ${originalLeafId} has closed`);
-                    helperLeaf.detach();
-                }
-                this.helperLeafIds.delete(originalLeafId);
-            }
-        });
-    }
-    checkAndDealWithUserOpeningHelperLeaves(newActiveLeaf) {
-        // No need to scold the user here since detaching the leaf will trigger it
-        if ([...this.helperLeafIds.values()].includes(newActiveLeaf.id))
-            newActiveLeaf.detach();
-    }
-    detachAllHelperLeaves() {
-        this.helperLeafIds.forEach((helperLeafId) => {
-            this.app.workspace.getLeafById(helperLeafId)?.detach();
-        });
-    }
-    async updateHelperForLeaf(leaf) {
-        const helperLeaf = this.app.workspace.getLeafById(
-            this.helperLeafIds.get(leaf?.id)
+
+    getActiveMarkdownLeaf() {
+        const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!activeView) return null;
+
+        return (
+            this.app.workspace.getLeavesOfType("markdown").find((leaf) => {
+                return leaf.view === activeView;
+            }) || null
         );
-        if (!helperLeaf) return;
-        // console.log("Updating helper for leaf", leaf.id);
-
-        const oldState = helperLeaf.view.getState();
-        const newState = leaf.view.getState();
-        await helperLeaf.setViewState({
-            type: "markdown",
-            state: newState,
-        });
-        if (oldState.file !== newState.file)
-            await this.initialForceloadContentInMarkdownView(helperLeaf.view);
     }
-    async initialForceloadContentInMarkdownView(view) {
-        // Force the contentEl to fully load by clearing and restoring its data - I don't know why view.clear() is the only thing that works...
-        if (view?.getViewType() !== "markdown") return;
-        view.contentEl
-            .querySelectorAll(".markdown-preview-sizer, .cm-sizer")
-            .forEach((el) => {
-                el.style = "transform-origin: top right; scale: .1;";
-            });
-        const data = await view.getViewData();
-        await view.clear();
-        await sleep(100);
-        await view.setViewData(data);
+
+    toggleActiveMinimap() {
+        const leaf = this.getActiveMarkdownLeaf();
+        if (!leaf) {
+            new Notice("Open a Markdown note to toggle the minimap.", 1200);
+            this.updateStatusBarToggle();
+            return;
+        }
+
+        this.toggleLeafMinimap(leaf, true);
+    }
+
+    toggleLeafMinimap(leaf, showNotice = false) {
+        const contentEl = leaf?.view?.contentEl;
+        if (!contentEl) return;
+
+        contentEl.dataset.minimapTouched = "true";
+        const disabled = contentEl.classList.toggle("minimap-disabled");
+        this.ensureLeaf(leaf);
+        this.updateLeafToggleButton(leaf);
+        this.updateStatusBarToggle();
+
+        if (showNotice && disabled) {
+            new Notice("Note Minimap disabled for this pane.", 1200);
+        }
+    }
+
+    updateLeafToggleButton(leaf) {
+        const contentEl = leaf?.view?.contentEl;
+        const button = leaf?.view?.containerEl?.querySelector(".minimap-toggle-button");
+        if (!contentEl || !button) return;
+
+        const enabled = !contentEl.classList.contains("minimap-disabled");
+        button.classList.toggle("is-active", enabled);
+        button.setAttribute("aria-pressed", enabled ? "true" : "false");
+        button.setAttribute("aria-label", enabled ? "Hide minimap" : "Show minimap");
+        button.setAttribute("title", enabled ? "Hide minimap" : "Show minimap");
+    }
+
+    updateStatusBarToggle() {
+        if (!this.statusBarToggleButton) return;
+
+        const leaf = this.getActiveMarkdownLeaf();
+        const contentEl = leaf?.view?.contentEl;
+        const hasMarkdownLeaf = Boolean(contentEl);
+        const enabled =
+            hasMarkdownLeaf && !contentEl.classList.contains("minimap-disabled");
+        const label = !hasMarkdownLeaf
+            ? "Minimap unavailable"
+            : enabled
+                ? "Hide minimap"
+                : "Show minimap";
+
+        this.statusBarToggleButton.disabled = !hasMarkdownLeaf;
+        this.statusBarToggleButton.classList.toggle("is-active", enabled);
+        this.statusBarToggleButton.setAttribute(
+            "aria-pressed",
+            enabled ? "true" : "false"
+        );
+        this.statusBarToggleButton.setAttribute("aria-label", label);
+        this.statusBarToggleButton.setAttribute("title", label);
     }
 }
 
-class Minimap {
-    constructor(plugin, element, settings, helperLeafId) {
+class MinimapInstance {
+    constructor(plugin, leaf, settings) {
         this.plugin = plugin;
-        this.element = element;
-        this.helperLeafId = helperLeafId;
-        this.helperElement =
-            plugin.app.workspace.getLeafById(helperLeafId)?.view?.contentEl;
-        this.sourceView = element.querySelector(".markdown-source-view");
-        this.modeChange();
-        this.updateSliderScroll = this.updateSliderScroll.bind(this);
-        this.onSliderMouseDown = this.onSliderMouseDown.bind(this);
+        this.leaf = leaf;
+        this.view = leaf.view;
+        this.contentEl = this.view.contentEl;
+        this.settings = Object.assign({}, settings);
+        this.destroyed = false;
+        this.dragging = false;
+        this.renderRequest = 0;
+
+        this.onScroll = this.onScroll.bind(this);
+        this.onPointerDown = this.onPointerDown.bind(this);
+        this.onPointerMove = this.onPointerMove.bind(this);
+        this.onPointerUp = this.onPointerUp.bind(this);
+        this.onResize = this.onResize.bind(this);
+        this.requestRender = this.requestRender.bind(this);
 
         this.setupElements();
+        this.resizeObserver = new ResizeObserver(this.onResize);
+        this.resizeObserver.observe(this.contentEl);
+        this.bindScroller();
         this.updateSettings(settings);
-
-        // Register events - need to remove on destroy!
-        this.scroller.addEventListener("scroll", this.updateSliderScroll);
-        this.slider.addEventListener("mousedown", this.onSliderMouseDown);
+        this.requestRender();
     }
-    _constructor(viewContent, scroller, settings) {
-        this.viewContent = viewContent;
-        this.updateSettings(settings);
-        this.updateSettingsInCSS();
 
-        // Create minimap elements
+    updateLeaf(leaf) {
+        const nextContentEl = leaf.view.contentEl;
+        if (nextContentEl !== this.contentEl) {
+            this.destroy();
+            this.plugin.instances.set(
+                leaf.id,
+                new MinimapInstance(this.plugin, leaf, this.plugin.settings)
+            );
+            return;
+        }
+
+        this.leaf = leaf;
+        this.view = leaf.view;
+        this.bindScroller();
+    }
+
+    updateSettings(settings) {
+        this.settings = Object.assign({}, settings);
+        this.contentEl.style.setProperty(
+            "--minimap-width",
+            `${this.settings.width}px`
+        );
+        this.container.style.width = `${this.settings.width}px`;
+        this.container.style.top = `${this.settings.topOffset}px`;
+        this.container.style.setProperty(
+            "--minimap-background",
+            alphaColor(getCssColor(this.contentEl, "--background-primary", "rgb(30, 30, 30)"), this.settings.minimapOpacity)
+        );
+        this.slider.style.opacity = this.settings.sliderOpacity;
+        this.requestRender();
+        this.updateSlider();
+    }
+
+    setupElements() {
+        this.contentEl
+            .querySelectorAll(".minimap-container")
+            .forEach((el) => el.remove());
+
+        this.contentEl.classList.add("minimap-host");
+
         this.container = document.createElement("div");
         this.container.className = "minimap-container";
+        this.container.setAttribute("aria-hidden", "true");
+        this.container.setAttribute("role", "presentation");
 
-        this.iframe = document.createElement("iframe");
-        this.iframe.className = "minimap-frame";
-        this.container.appendChild(this.iframe);
+        this.canvas = document.createElement("canvas");
+        this.canvas.className = "minimap-canvas";
+        this.container.appendChild(this.canvas);
 
         this.slider = document.createElement("div");
         this.slider.className = "minimap-slider";
         this.container.appendChild(this.slider);
 
-        // Append minimap to note
-        this.viewContent
-            .querySelectorAll(
-                ".minimap-container, .minimap-frame, .minimap-slider"
-            )
-            .forEach((e) => e.remove());
-        this.viewContent.prepend(this.container);
+        this.contentEl.prepend(this.container);
 
-        //
-        this.updateSliderScroll = this.updateSliderScroll.bind(this);
-        this.onSliderMouseDown = this.onSliderMouseDown.bind(this);
-        this.changeScroller(scroller);
+        this.container.addEventListener("pointerdown", this.onPointerDown);
+        this.container.addEventListener("pointermove", this.onPointerMove);
+        this.container.addEventListener("pointerup", this.onPointerUp);
+        this.container.addEventListener("pointercancel", this.onPointerUp);
+        this.container.addEventListener("lostpointercapture", this.onPointerUp);
     }
 
-    updateSettings(settings) {
-        this.scale = settings.scale;
-        this.minimapOpacity = settings.minimapOpacity;
-        this.sliderOpacity = settings.sliderOpacity;
-        this.topOffset = settings.topOffset;
+    bindScroller() {
+        const nextScroller = this.findScroller();
+        if (this.scroller === nextScroller) return;
 
-        this.backgroundColor = toRGBAAlpha(
-            document
-                .querySelector(".view-content")
-                .getCssPropertyValue("background-color"),
-            this.minimapOpacity
+        if (this.scroller) {
+            this.scroller.removeEventListener("scroll", this.onScroll);
+        }
+
+        this.scroller = nextScroller;
+
+        if (this.scroller) {
+            this.scroller.addEventListener("scroll", this.onScroll, {
+                passive: true,
+            });
+        }
+
+        this.updateSlider();
+    }
+
+    findScroller() {
+        return (
+            this.contentEl.querySelector(".cm-scroller") ||
+            this.contentEl.querySelector(".markdown-preview-view") ||
+            this.contentEl.querySelector(".markdown-reading-view")
+        );
+    }
+
+    onResize() {
+        if (this.destroyed) return;
+        this.bindScroller();
+        this.requestRender();
+        this.updateSlider();
+    }
+
+    onScroll() {
+        if (this.destroyed) return;
+        this.requestRender();
+        this.updateSlider();
+    }
+
+    requestRender() {
+        if (this.destroyed || this.renderRequest) return;
+
+        this.renderRequest = requestAnimationFrame(() => {
+            this.renderRequest = 0;
+            this.render();
+        });
+    }
+
+    async render() {
+        if (this.destroyed) return;
+
+        const rect = this.container.getBoundingClientRect();
+        const width = Math.max(1, Math.floor(rect.width));
+        const height = Math.max(1, Math.floor(rect.height));
+        const ratio = window.devicePixelRatio || 1;
+
+        this.canvas.width = Math.max(1, Math.floor(width * ratio));
+        this.canvas.height = Math.max(1, Math.floor(height * ratio));
+        this.canvas.style.width = `${width}px`;
+        this.canvas.style.height = `${height}px`;
+
+        const ctx = this.canvas.getContext("2d");
+        if (!ctx) return;
+
+        ctx.scale(ratio, ratio);
+        ctx.clearRect(0, 0, width, height);
+
+        const background = alphaColor(
+            getCssColor(this.contentEl, "--background-primary", "rgb(30, 30, 30)"),
+            this.settings.minimapOpacity
+        );
+        ctx.fillStyle = background;
+        ctx.fillRect(0, 0, width, height);
+
+        const text = await this.getText();
+        if (this.destroyed) return;
+
+        const lines = this.getVisualLines(text);
+        const metrics = this.getScrollMetrics();
+        const lineHeight = this.getMiniLineHeight();
+        const minimapContentHeight = Math.max(height, lines.length * lineHeight);
+        const maxMinimapScroll = Math.max(0, minimapContentHeight - height);
+        const minimapScroll =
+            metrics.maxScroll === 0
+                ? 0
+                : (metrics.scrollTop / metrics.maxScroll) * maxMinimapScroll;
+        const firstVisibleLine = clamp(
+            Math.floor(minimapScroll / lineHeight),
+            0,
+            Math.max(0, lines.length - 1)
+        );
+        const yOffset = -(minimapScroll % lineHeight);
+        const linesToPaint = Math.ceil((height - yOffset) / lineHeight) + 2;
+        const textColor = getCssColor(this.contentEl, "--text-muted", "rgb(145, 145, 145)");
+        const headingColor = getCssColor(this.contentEl, "--text-normal", "rgb(190, 190, 190)");
+        const linkColor = getCssColor(this.contentEl, "--link-color", textColor);
+
+        ctx.textBaseline = "top";
+        ctx.font = `${Math.max(2, lineHeight)}px monospace`;
+
+        let y = yOffset;
+        for (
+            let index = firstVisibleLine;
+            index < lines.length && index < firstVisibleLine + linesToPaint;
+            index++
+        ) {
+            const line = lines[index] || "";
+            this.paintLine(ctx, line, 0, y, width, lineHeight, {
+                textColor,
+                headingColor,
+                linkColor,
+            });
+            y += lineHeight;
+        }
+
+        this.updateSlider();
+    }
+
+    paintLine(ctx, line, x, y, width, lineHeight, colors) {
+        const trimmed = line.trimStart();
+        const indent = Math.min(28, Math.max(0, line.length - trimmed.length) * 0.7);
+        const maxColumn = Math.max(1, this.settings.maxColumn || DEFAULT_SETTINGS.maxColumn);
+        const clipped = trimmed.slice(0, maxColumn);
+        const visualWidth = Math.min(
+            width - indent,
+            Math.max(2, (clipped.length / maxColumn) * (width - 6))
         );
 
-        if (this.iframe && this.slider) {
-            this.updateSettingsInCSS();
-            this.onResize();
-            this.updateIframe();
-            this.updateSliderScroll();
+        if (!clipped) {
+            ctx.fillStyle = alphaColor(colors.textColor, 0.18);
+            ctx.fillRect(x + indent, y + Math.max(0, lineHeight - 1), Math.min(12, width), 1);
+            return;
+        }
+
+        if (trimmed.startsWith("#")) {
+            ctx.fillStyle = alphaColor(colors.headingColor, 0.78);
+        } else if (/\[[^\]]+\]\([^)]+\)|https?:\/\//.test(trimmed)) {
+            ctx.fillStyle = alphaColor(colors.linkColor, 0.5);
+        } else {
+            ctx.fillStyle = alphaColor(colors.textColor, 0.56);
+        }
+
+        if (!this.settings.renderCharacters || lineHeight < 3) {
+            ctx.fillRect(x + indent, y + Math.max(0, Math.floor(lineHeight / 2) - 1), visualWidth, Math.max(1, Math.floor(lineHeight / 2)));
+            return;
+        }
+
+        const text = clipped.replace(/\t/g, "    ");
+        ctx.fillText(text, x + indent, y, width - indent);
+    }
+
+    getVisualLines(text) {
+        const maxColumn = Math.max(1, this.settings.maxColumn || DEFAULT_SETTINGS.maxColumn);
+        const result = [];
+
+        for (const rawLine of text.split(/\r\n|\r|\n/)) {
+            const line = rawLine || "";
+            if (line.length <= maxColumn) {
+                result.push(line);
+                continue;
+            }
+
+            const indent = line.match(/^\s*/)?.[0] || "";
+            let remaining = line.trimEnd();
+
+            while (remaining.length > maxColumn) {
+                let splitAt = remaining.lastIndexOf(" ", maxColumn);
+                if (splitAt < Math.floor(maxColumn * 0.45)) {
+                    splitAt = maxColumn;
+                }
+
+                result.push(remaining.slice(0, splitAt));
+                remaining = `${indent}${remaining.slice(splitAt).trimStart()}`;
+            }
+
+            result.push(remaining || indent);
+        }
+
+        return result.length ? result : [""];
+    }
+
+    async getText() {
+        try {
+            if (this.view?.editor?.getValue) {
+                return this.view.editor.getValue();
+            }
+
+            const file = this.view?.file;
+            if (file?.path) {
+                return await this.plugin.app.vault.cachedRead(file);
+            }
+        } catch (error) {
+            console.warn("NoteMinimap: failed to read note text", error);
+        }
+
+        return "";
+    }
+
+    getMiniLineHeight() {
+        return clamp(Math.round(this.getEditorLineHeight() * this.getScale()), 3, 9);
+    }
+
+    getEditorLineHeight() {
+        const scroller = this.scroller || this.findScroller();
+        const computed = scroller ? getComputedStyle(scroller) : null;
+        const editorLineHeight = computed ? Number.parseFloat(computed.lineHeight) : 20;
+        return Number.isFinite(editorLineHeight) && editorLineHeight > 0
+            ? editorLineHeight
+            : 20;
+    }
+
+    getScale() {
+        return clamp(Number(this.settings.scale) || DEFAULT_SETTINGS.scale, 0.05, 0.3);
+    }
+
+    getTrackRect() {
+        const rect = this.container.getBoundingClientRect();
+        const topOffset = this.settings.topOffset || 0;
+        return {
+            top: rect.top,
+            left: rect.left,
+            width: rect.width,
+            height: Math.max(1, rect.height),
+            bottom: rect.bottom,
+            topOffset,
+        };
+    }
+
+    getScrollMetrics() {
+        this.bindScroller();
+
+        if (!this.scroller) {
+            return {
+                scrollTop: 0,
+                scrollHeight: 1,
+                clientHeight: 1,
+                maxScroll: 0,
+            };
+        }
+
+        const scrollHeight = Math.max(1, this.scroller.scrollHeight);
+        const clientHeight = Math.max(1, this.scroller.clientHeight);
+        const maxScroll = Math.max(0, scrollHeight - clientHeight);
+
+        return {
+            scrollTop: clamp(this.scroller.scrollTop, 0, maxScroll),
+            scrollHeight,
+            clientHeight,
+            maxScroll,
+        };
+    }
+
+    updateSlider() {
+        if (this.destroyed || !this.slider) return;
+
+        const track = this.getTrackRect();
+        const metrics = this.getScrollMetrics();
+        const sliderHeight = clamp(
+            (metrics.clientHeight / metrics.scrollHeight) * track.height,
+            24,
+            track.height
+        );
+        const maxSliderTop = Math.max(0, track.height - sliderHeight);
+        const sliderTop =
+            metrics.maxScroll === 0
+                ? 0
+                : (metrics.scrollTop / metrics.maxScroll) * maxSliderTop;
+
+        this.slider.style.height = `${sliderHeight}px`;
+        this.slider.style.transform = `translateY(${sliderTop}px)`;
+        this.slider.style.display = metrics.maxScroll > 0 ? "block" : "none";
+    }
+
+    onPointerDown(event) {
+        if (this.destroyed || event.button !== 0) return;
+
+        this.bindScroller();
+        if (!this.scroller) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        const sliderRect = this.slider.getBoundingClientRect();
+        const isOnSlider =
+            event.clientY >= sliderRect.top && event.clientY <= sliderRect.bottom;
+        this.dragOffset = isOnSlider
+            ? event.clientY - sliderRect.top
+            : sliderRect.height / 2;
+
+        this.dragging = true;
+        this.slider.classList.add("dragging");
+        this.container.setPointerCapture?.(event.pointerId);
+        this.scrollToPointer(event.clientY);
+    }
+
+    onPointerMove(event) {
+        if (!this.dragging) return;
+        event.preventDefault();
+        this.scrollToPointer(event.clientY);
+    }
+
+    onPointerUp(event) {
+        if (!this.dragging) return;
+
+        this.cancelDrag();
+        if (event?.pointerId !== undefined) {
+            this.container.releasePointerCapture?.(event.pointerId);
         }
     }
 
-    updateSettingsInCSS() {
-        if (this.iframe) this.iframe.style.setProperty("--scale", this.scale);
-        if (this.slider) this.slider.style.setProperty("--scale", this.scale);
-        if (this.slider) this.slider.style.opacity = this.sliderOpacity;
-        if (this.iframe) this.iframe.style.top = `${this.topOffset}px`;
+    cancelDrag() {
+        this.dragging = false;
+        this.dragOffset = 0;
+        this.slider?.classList.remove("dragging");
+    }
+
+    scrollToPointer(clientY) {
+        const track = this.getTrackRect();
+        const metrics = this.getScrollMetrics();
+        const sliderHeight = clamp(
+            (metrics.clientHeight / metrics.scrollHeight) * track.height,
+            24,
+            track.height
+        );
+        const maxSliderTop = Math.max(0, track.height - sliderHeight);
+        const offset = clamp(clientY - track.top - this.dragOffset, 0, maxSliderTop);
+        const nextScroll =
+            maxSliderTop === 0 ? 0 : (offset / maxSliderTop) * metrics.maxScroll;
+
+        this.scroller.scrollTop = nextScroll;
+        this.updateSlider();
     }
 
     destroy() {
-        this.scroller.removeEventListener("scroll", this.updateSliderScroll);
-        this.slider.removeEventListener("mousedown", this.onSliderMouseDown);
-        document.removeEventListener("mousemove", this.onSliderMouseMove);
-        document.removeEventListener("mouseup", this.onSliderMouseUp);
+        if (this.destroyed) return;
+        this.destroyed = true;
 
-        this.iframe.remove();
-        this.slider.remove();
+        if (this.renderRequest) {
+            cancelAnimationFrame(this.renderRequest);
+            this.renderRequest = 0;
+        }
 
-        this.iframe = null;
-        this.slider = null;
-        // console.log("destroyed");
-    }
-
-    isReadModeActive() {
-        return this.sourceView.clientHeight === 0;
-    }
-
-    modeChange() {
-        this.changeScroller(
-            this.element.querySelector(
-                this.isReadModeActive()
-                    ? ".markdown-preview-view"
-                    : ".cm-scroller"
-            )
-        );
-    }
-    changeScroller(newScroller) {
         if (this.scroller) {
-            this.scroller.removeEventListener(
-                "scroll",
-                this.updateSliderScroll
-            );
+            this.scroller.removeEventListener("scroll", this.onScroll);
+            this.scroller = null;
         }
-        this.scroller = newScroller;
-        if (this.scroller) {
-            this.scroller.addEventListener("scroll", this.updateSliderScroll);
-            this.onResize();
-        }
+
+        this.resizeObserver?.disconnect();
+        this.container?.removeEventListener("pointerdown", this.onPointerDown);
+        this.container?.removeEventListener("pointermove", this.onPointerMove);
+        this.container?.removeEventListener("pointerup", this.onPointerUp);
+        this.container?.removeEventListener("pointercancel", this.onPointerUp);
+        this.container?.removeEventListener("lostpointercapture", this.onPointerUp);
+        this.container?.remove();
+        this.contentEl?.style.removeProperty("--minimap-width");
+        this.contentEl?.classList.remove("minimap-host");
     }
-
-    async onResize() {
-        await sleep(300);
-
-        this.resize(
-            this.scroller.firstChild.getBoundingClientRect().height,
-            this.scroller.getBoundingClientRect().height
-        );
-    }
-    resize(fullHeight, visibleHeight) {
-        this.iframe.style.height = `${fullHeight}px`;
-        this.slider.style.height = `${visibleHeight * this.scale}px`;
-        this.updateSliderScroll();
-    }
-
-    setupElements() {
-        this.element
-            .querySelectorAll(
-                ".minimap-container, .minimap-frame, .minimap-slider"
-            )
-            .forEach((e) => e.remove());
-
-        const container = document.createElement("div");
-        container.className = "minimap-container";
-        this.element.prepend(container);
-
-        this.iframe = document.createElement("iframe");
-        this.iframe.className = "minimap-frame";
-        container.appendChild(this.iframe);
-
-        this.slider = document.createElement("div");
-        this.slider.className = "minimap-slider";
-        container.appendChild(this.slider);
-    }
-
-    async updateIframe(noteContent) {
-        if (!noteContent) noteContent = await this.getFullHTML();
-        noteContent
-            .querySelectorAll(".minimap-frame, .minimap-slider")
-            .forEach((el) => el.remove());
-
-        // Clone styles
-        const styleElements = Array.from(
-            document.head.querySelectorAll('style, link[rel="stylesheet"]')
-        );
-        const stylesHTML = styleElements.map((el) => el.outerHTML).join("\n");
-
-        const themeClass = document.body.classList.contains("theme-dark")
-            ? "theme-dark"
-            : "theme-light";
-
-        const rootStyles = getComputedStyle(
-            document.documentElement.querySelector("body")
-        );
-        let cssVars = ":root {\n";
-        for (let i = 0; i < rootStyles.length; i++) {
-            const prop = rootStyles[i];
-            if (prop.startsWith("--")) {
-                const value = rootStyles.getPropertyValue(prop);
-                cssVars += `  ${prop}: ${value};\n`;
-            }
-        }
-        cssVars += "}";
-        // Remove scrollbar inside minimap
-        cssVars += "::-webkit-scrollbar {display: none;}";
-
-        const html = `
-		<!DOCTYPE html>
-		<html>
-		<head>${stylesHTML}<style>${cssVars}</style></head>
-		<body style="background-color:${this.backgroundColor}" class="${themeClass} ${
-            this.isReadModeActive() ? "" : "markdown-preview-view"
-        } show-inline-title">${noteContent.innerHTML}</body>
-		</html>
-	`;
-
-        if (this.iframe) this.iframe.srcdoc = html;
-    }
-
-    updateSliderScroll() {
-        if (!this.scroller) return;
-        const scrollTop = this.scroller.scrollTop;
-        const boxTop = scrollTop * this.scale + (this.topOffset || 0);
-        this.slider.style.top = `${boxTop}px`;
-    }
-
-    // Needed since obsidian doesn't load non-visible parts of the note (can't be changed).
-    async getFullHTML() {
-        if (this.isReadModeActive()) {
-            // We can just use MarkdownRenderer.render() directly to load all content
-            return await renderReadMode(this.plugin, this.element);
-        }
-        return await renderEditMode(this.helperElement, this.scroller);
-    }
-
-    onSliderMouseDown(e) {
-        e.preventDefault();
-        this.isDragging = true;
-        this.slider.classList.add("dragging");
-
-        const sliderRect = this.slider.getBoundingClientRect();
-        this.dragOffsetY = e.clientY - sliderRect.top;
-
-        document.addEventListener("mousemove", this.onSliderMouseMove);
-        document.addEventListener("mouseup", this.onSliderMouseUp);
-    }
-
-    onSliderMouseMove = (e) => {
-        if (!this.isDragging) return;
-
-        const editorRect = this.element.getBoundingClientRect();
-        let offsetY =
-            e.clientY - editorRect.top - this.dragOffsetY - this.topOffset;
-
-        // Clamp to editor bounds
-        const maxScroll =
-            this.scroller.scrollHeight - this.scroller.clientHeight;
-        const maxOffset = maxScroll * this.scale;
-
-        offsetY = Math.max(0, Math.min(offsetY, maxOffset));
-
-        const scrollY = offsetY / this.scale;
-        this.scroller.scrollTop = scrollY;
-
-        this.updateSliderScroll(); // keep slider visually synced
-    };
-
-    onSliderMouseUp = () => {
-        this.isDragging = false;
-        this.slider.classList.remove("dragging");
-        document.removeEventListener("mousemove", this.onSliderMouseMove);
-        document.removeEventListener("mouseup", this.onSliderMouseUp);
-    };
 }
-
-// editor-mode-change & close-leaf are not working!
 
 module.exports = {
     default: NoteMinimap,
 };
 
-function throttle(fn, limit, options = { leading: false, trailing: true }) {
-    let inThrottle = false;
-    let lastArgs, lastThis;
-
-    const invoke = () => {
-        if (lastArgs) {
-            fn.apply(lastThis, lastArgs);
-            lastArgs = lastThis = null;
-            setTimeout(invoke, limit);
-        } else {
-            inThrottle = false;
-        }
-    };
-
-    return function (...args) {
-        if (!inThrottle) {
-            if (options.leading) {
-                fn.apply(this, args);
-            } else {
-                lastArgs = args;
-                lastThis = this;
-            }
-            inThrottle = true;
-            setTimeout(invoke, limit);
-        } else if (options.trailing) {
-            lastArgs = args;
-            lastThis = this;
-        }
-    };
+function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
 }
 
-function toRGBAAlpha(color, alpha) {
-    if (color.startsWith("#")) {
-        // hex to rgb
-        let hex = color.replace("#", "");
-        if (hex.length === 3)
+function getCssColor(element, variableName, fallback) {
+    const value = getComputedStyle(element).getPropertyValue(variableName).trim();
+    return value || fallback;
+}
+
+function alphaColor(color, alpha) {
+    if (!color) return `rgba(0, 0, 0, ${alpha})`;
+    const trimmed = color.trim();
+
+    if (trimmed.startsWith("#")) {
+        let hex = trimmed.slice(1);
+        if (hex.length === 3) {
             hex = hex
                 .split("")
-                .map((x) => x + x)
+                .map((part) => part + part)
                 .join("");
-        const num = parseInt(hex, 16);
-        const r = (num >> 16) & 255;
-        const g = (num >> 8) & 255;
-        const b = num & 255;
-        return `rgba(${r},${g},${b},${alpha})`;
-    } else if (color.startsWith("rgb")) {
-        // rgb or rgba
-        const nums = color.match(/[\d.]+/g);
-        if (nums.length >= 3) {
-            return `rgba(${nums[0]},${nums[1]},${nums[2]},${alpha})`;
+        }
+
+        if (hex.length >= 6) {
+            const value = Number.parseInt(hex.slice(0, 6), 16);
+            const r = (value >> 16) & 255;
+            const g = (value >> 8) & 255;
+            const b = value & 255;
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
         }
     }
-    // fallback
-    return color;
-}
 
-async function renderReadMode(plugin, structureNode) {
-    const structure = structureNode.cloneNode(true);
-    structure
-        .querySelectorAll(".view-content > :not(.markdown-reading-view)")
-        .forEach((e) => e.remove());
-    const destination = structure.querySelector(".markdown-preview-sizer");
-    const titleElement = destination
-        .querySelector(".mod-header")
-        ?.cloneNode(true);
-    destination.innerHTML = ""; // clear existing content
-    await MarkdownRenderer.render(
-        plugin.app,
-        await plugin.app.workspace
-            .getActiveFile()
-            .vault.read(plugin.app.workspace.getActiveFile()),
-        destination,
-        plugin.app.workspace.getActiveFile().path,
-        plugin
-    );
-    if (titleElement)
-        destination.insertBefore(titleElement, destination.firstChild);
-    return structure;
-}
-async function renderEditMode(helperElement, scroller) {
-    let noteContent;
-    if (helperElement) {
-        // Better Rendering: use helper note if available
-        noteContent = helperElement.cloneNode(true);
-    } else {
-        const sizer = scroller.firstChild;
-        const element = scroller.parentElement.parentElement.parentElement;
-        // Fallback: use current note but try to force full rendering
-        sizer.style = "transform-origin: top right; scale: .1;";
-        element.offsetWidth; // trigger reflow
-        await sleep(10);
-
-        noteContent = element.cloneNode(true);
-        sizer.style = "";
+    const match = trimmed.match(/rgba?\(([^)]+)\)/);
+    if (match) {
+        const parts = match[1]
+            .split(",")
+            .map((part) => part.trim())
+            .slice(0, 3);
+        if (parts.length === 3) {
+            return `rgba(${parts.join(", ")}, ${alpha})`;
+        }
     }
 
-    noteContent.querySelectorAll(".cm-sizer").forEach((e) => (e.style = ""));
-
-    // Remove other content (fix for trouble with Editing Toolbar Plugin)
-    noteContent
-        .querySelectorAll(".markdown-source-view > :not(.cm-editor)")
-        .forEach((e) => e.remove());
-
-    return noteContent;
+    return trimmed;
 }

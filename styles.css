@@ -1,40 +1,75 @@
-.minimap-frame {
-    position: absolute;
-    width: 100%;
-    pointer-events: none;
-    scale: var(--scale);
-    transform-origin: top right;
-    z-index: 1;
-}
-
-.minimap-slider {
-    right: 0;
-    position: absolute;
-    width: calc(100% * var(--scale));
-    background-color: var(--code-comment);
-    z-index: 2;
-}
-
-.minimap-slider.dragging {
-    opacity: 0.5 !important;
+.minimap-host {
+    position: relative;
 }
 
 .minimap-container {
     position: absolute;
-    height: 100%;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    cursor: pointer;
+    overflow: hidden;
+    background: var(--minimap-background);
+    border-left: 1px solid var(--background-modifier-border);
+    contain: strict;
+    touch-action: none;
+    user-select: none;
+}
+
+.minimap-host:not(.minimap-disabled) .cm-scroller,
+.minimap-host:not(.minimap-disabled) .markdown-preview-view {
+    padding-right: calc(var(--minimap-width, 120px) + 8px);
+}
+
+.minimap-canvas {
+    position: absolute;
+    inset: 0;
     width: 100%;
+    height: 100%;
+    pointer-events: none;
 }
 
-body:not(.native-scrollbars) ::-webkit-scrollbar {
-    display: none;
+.minimap-slider {
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 0;
+    min-height: 24px;
+    background: rgba(128, 128, 128, 0.42);
+    border: 1px solid var(--background-modifier-border);
+    box-shadow: inset 0 0 0 1px var(--background-primary);
+    pointer-events: none;
+    will-change: transform, height;
 }
 
-body:not(.native-scrollbars) .minimap-disabled ::-webkit-scrollbar {
-    display: block;
+.minimap-slider.dragging {
+    opacity: 0.65 !important;
 }
 
-.minimap-disabled .minimap-container,
-.minimap-disabled .minimap-frame,
-.minimap-disabled .minimap-slider {
+.minimap-status-bar-item {
+    padding: 0;
+}
+
+.minimap-status-toggle {
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.minimap-status-toggle.is-active,
+.minimap-toggle-button.is-active {
+    color: var(--interactive-accent);
+}
+
+.minimap-status-toggle:disabled {
+    cursor: default;
+    opacity: 0.45;
+}
+
+.minimap-disabled .minimap-container {
     display: none !important;
+}
+
+body:not(.native-scrollbars) .minimap-host:not(.minimap-disabled) ::-webkit-scrollbar {
+    width: 0;
+    height: 0;
 }
